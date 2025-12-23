@@ -1,0 +1,174 @@
+name: PR Automation Workflow
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run ESLint
+        id: eslint
+        run: npm run lint || echo "eslint_failed=true" >> $GITHUB_OUTPUT
+      - name: Run Prettier check
+        id: prettier
+        run: npx prettier --check . || echo "prettier_failed=true" >> $GITHUB_OUTPUT
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { eslint_failed, prettier_failed } = process.env;
+            let comment = "## Code Quality Report\n\n";
+            comment += "### ESLint Checks: " + (eslint_failed ? "❌ Failed" : "✅ Passed") + "\n";
+            comment += "### Prettier Formatting: " + (prettier_failed ? "❌ Failed" : "✅ Passed") + "\n";
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+        env:
+          eslint_failed: ${{ steps.eslint.outputs.eslint_failed }}
+          prettier_failed: ${{ steps.prettier.outputs.prettier_failed }}
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests with coverage
+        id: test
+        run: npm test -- --coverage || echo "test_failed=true" >> $GITHUB_OUTPUT
+      - name: Generate coverage summary
+        id: coverage
+        run: |
+          COVERAGE=$(cat coverage/lcov.info | grep -E "(statements|branches|functions|lines):" | awk '{print $1 " " $2}')
+          echo "coverage_summary<<EOF" >> $GITHUB_OUTPUT
+          echo "$COVERAGE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { test_failed, coverage_summary } = process.env;
+            let comment = "## Test Coverage Report\n\n";
+            comment += "### Test Suite: " + (test_failed ? "❌ Failed" : "✅ Passed") + "\n";
+            comment += "### Coverage Summary:\n```\n" + coverage_summary + "\n```\n";
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+        env:
+          test_failed: ${{ steps.test.outputs.test_failed }}
+          coverage_summary: ${{ steps.coverage.outputs.coverage_summary }}
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install git-secrets
+        run: sudo apt-get install -y git-secrets
+      - name: Install dependencies
+        run: npm ci
+      - name: Run dependency vulnerability check
+        id: audit
+        run: npm audit --json || echo "audit_failed=true" >> $GITHUB_OUTPUT
+      - name: Scan for secrets
+        id: secrets
+        run: |
+          git secrets --scan || echo "secrets_found=true" >> $GITHUB_OUTPUT
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { audit_failed, secrets_found } = process.env;
+            let comment = "## Security Scan Report\n\n";
+            comment += "### Dependencies Vulnerabilities: " + (audit_failed ? "❌ Found" : "✅ None") + "\n";
+            comment += "### Secrets in Code: " + (secrets_found ? "❌ Detected" : "✅ None") + "\n";
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+        env:
+          audit_failed: ${{ steps.audit.outputs.audit_failed }}
+          secrets_found: ${{ steps.secrets.outputs.secrets_found }}
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build application
+        id: build
+        run: npm run build || echo "build_failed=true" >> $GITHUB_OUTPUT
+      - name: Validate endpoints (example)
+        id: endpoints
+        run: |
+          npm start &
+          sleep 10
+          curl -f http://localhost:3000 || echo "endpoints_failed=true" >> $GITHUB_OUTPUT
+          pkill -f "npm start"
+      - name: Create deployment preview artifacts
+        run: |
+          mkdir -p preview-artifacts
+          cp -r dist/* preview-artifacts/
+      - name: Post Build Validation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { build_failed, endpoints_failed } = process.env;
+            let comment = "## Build Validation\n\n";
+            comment += "### Application Build: " + (build_failed ? "❌ Failed" : "✅ Passed") + "\n";
+            comment += "### Endpoints Accessibility: " + (endpoints_failed ? "❌ Failed" : "✅ Passed") + "\n";
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+        env:
+          build_failed: ${{ steps.build.outputs.build_failed }}
+          endpoints_failed: ${{ steps.endpoints.outputs.endpoints_failed }}
+      - name: Upload preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-preview
+          path: preview-artifacts/
